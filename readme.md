@@ -129,6 +129,11 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
+# Dense export for lm-eval-harness / plain AutoModel loading.
+dense_model_id = "./results/compressed_model/Qwen3-8B/DobiSVD_Dense-Qwen3-8B-0.2"
+model = AutoModelForCausalLM.from_pretrained(dense_model_id, torch_dtype=torch.float16)
+tokenizer = AutoTokenizer.from_pretrained(dense_model_id)
+
 # Load the remapping Model
 model_id = "./results/compressed_model/Llama-2-7b-hf/DobiSVD-Llama-2-7b-hf-0.4"
 model, tokenizer = load_remapping_model(model_id)

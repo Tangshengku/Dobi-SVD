@@ -18,6 +18,7 @@ PATH_HEAD_FOLDER_OUTPUT="${PATH_HEAD_FOLDER_OUTPUT:-./results}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 REMAPPING="${REMAPPING:-1}"
 SKIP_EVAL="${SKIP_EVAL:-1}"
+SAVE_DENSE="${SAVE_DENSE:-1}"
 
 EXTRA_FLAGS=()
 if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
@@ -61,6 +62,9 @@ if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
 fi
 if [[ "${REMAPPING}" == "1" ]]; then
   UPDATE_FLAGS+=(--remapping)
+fi
+if [[ "${SAVE_DENSE}" == "1" ]]; then
+  UPDATE_FLAGS+=(--save_dense)
 fi
 
 python weight_updater.py \

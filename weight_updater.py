@@ -163,6 +163,7 @@ def main(args):
         output_dir.mkdir(parents=True, exist_ok=True)
         output_save_path = str(output_dir) + "/" + "remapping_weight.pt"
     print("The compressed model will be saved in", output_save_path)
+    dense_output_dir = save_dir / f"DobiSVD_Dense-{lower_id}-{target_compression_ratio}"
     
     no_svd_layers = para_data.get("no_svd_layer", get_no_svd_layers(lower_id))
 
@@ -298,6 +299,19 @@ def main(args):
             new_weight = change_weight(gamma, W, name)
             module.weight.data = new_weight
             del W
+
+    if args.save_dense:
+        dense_output_dir.mkdir(parents=True, exist_ok=True)
+        model.config.dobi_svd = {
+            "format": "dense_hf",
+            "base_model_id": model_id,
+            "target_compression_ratio": target_compression_ratio,
+            "seq_len": SEQ_LEN,
+            "no_svd_layers": no_svd_layers,
+        }
+        model.save_pretrained(dense_output_dir, safe_serialization=True)
+        tokenizer.save_pretrained(dense_output_dir)
+        print("Dense HF model saved in", dense_output_dir)
         
         
     # update and save model
@@ -424,6 +438,13 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="whether to use remaping to save model",
+    )
+
+    parser.add_argument(
+        "--save_dense",
+        action="store_true",
+        default=False,
+        help="also save dense HF weights after Dobi-SVD weight update for direct AutoModel/lm-harness loading",
     )
     
 #==========================================================================    
