@@ -23,11 +23,79 @@ import time
 from utils.datautils import prepare_train_loaders
 from utils.modeling import get_no_svd_layers, load_causal_lm_and_tokenizer, should_decompose_linear
 from modules.IncrementalPCA import IncrementalPCAonGPU
-from modules.module import SVDTransformLayer
-from modules.remapping import DOBI_quantize
+from modules.module import SVDTransformLayer, SVDTransformLayer_remapping
+from modules.remapping import DOBI_dequantize, DOBI_quantize
 
 
 
+
+
+def _parent_and_attr(model, name):
+    parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+    attr_name = name.rsplit('.', 1)[-1]
+    parent = dict(model.named_modules())[parent_name] if parent_name else model
+    return parent, attr_name
+
+
+def _compressed_layers_metadata(model):
+    layers = []
+    for name, module in model.named_modules():
+        if isinstance(module, (SVDTransformLayer, SVDTransformLayer_remapping)):
+            layers.append({
+                "name": name,
+                "in_features": module.ALinear.in_features,
+                "rank": module.ALinear.out_features,
+                "out_features": module.BLinear.out_features,
+                "bias": module.BLinear.bias is not None,
+            })
+    return layers
+
+
+def _write_direct_load_code(output_dir, base_module, base_class):
+    code = f'''import torch
+import torch.nn as nn
+from {base_module} import {base_class}
+
+
+class DobiSVDLinear(nn.Module):
+    def __init__(self, in_features, rank, out_features, bias=False):
+        super().__init__()
+        self.ALinear = nn.Linear(in_features, rank, bias=False)
+        self.BLinear = nn.Linear(rank, out_features, bias=bias)
+
+    def forward(self, x):
+        return self.BLinear(self.ALinear(x))
+
+
+class DobiSVDForCausalLM({base_class}):
+    def __init__(self, config):
+        super().__init__(config)
+        dobi_config = getattr(config, "dobi_svd", {{}}) or {{}}
+        for layer in dobi_config.get("compressed_layers", []):
+            self._replace_with_dobisvd_linear(layer)
+
+    def _replace_with_dobisvd_linear(self, layer):
+        parent_name, attr_name = layer["name"].rsplit(".", 1) if "." in layer["name"] else ("", layer["name"])
+        parent = self.get_submodule(parent_name) if parent_name else self
+        new_layer = DobiSVDLinear(
+            layer["in_features"],
+            layer["rank"],
+            layer["out_features"],
+            bias=layer.get("bias", False),
+        )
+        setattr(parent, attr_name, new_layer)
+'''
+    with open(output_dir / "modeling_dobisvd.py", "w") as handle:
+        handle.write(code)
+
+
+def _enable_direct_transformers_load(model, output_dir):
+    model.config.dobi_svd["compressed_layers"] = _compressed_layers_metadata(model)
+    model.config.auto_map = {
+        "AutoModelForCausalLM": "modeling_dobisvd.DobiSVDForCausalLM",
+    }
+    model.config.architectures = ["DobiSVDForCausalLM"]
+    _write_direct_load_code(output_dir, model.__class__.__module__, model.__class__.__name__)
 
 
 def main(args):
@@ -236,15 +304,11 @@ def main(args):
     if not args.remapping:
         for name, module in tqdm(model.named_modules(), desc="Decomposition weights"):
             if should_decompose_linear(name, module, no_svd_layers):
-                parent_name = name.rsplit('.', 1)[0] if '.' in name else '' # split from right 1 time
-                attr_name = name.rsplit('.', 1)[-1]
-                if parent_name != '':
-                    parent = dict(model.named_modules())[parent_name]
-                else:
-                    parent = model
+                parent, attr_name = _parent_and_attr(model, name)
                 cut = min(module.in_features, module.out_features)/SEQ_LEN
                 gamma = cut * torch.tensor(gamma_json[name], dtype=computeSVD_dtype)
                 gamma = cut * math.ceil(gamma/cut)
+                gamma = max(1, min(module.in_features, module.out_features, int(gamma)))
                 NewLayer = SVDTransformLayer(gamma =int(gamma), weight = module.weight.data.detach(), 
                                              bias = module.bias, name = name, device = model.device)
                 setattr(parent, attr_name, NewLayer)
@@ -257,11 +321,13 @@ def main(args):
             "seq_len": SEQ_LEN,
             "no_svd_layers": no_svd_layers,
         }
+        _enable_direct_transformers_load(model, output_dir)
         model.save_pretrained(output_dir, safe_serialization=True)
         tokenizer.save_pretrained(output_dir)
         
     if args.remapping:
         mapping_info = {}
+        remapped_modules = {}
         for name, module in tqdm(model.named_modules(), desc="Remapping weights"):
             if should_decompose_linear(name, module, no_svd_layers):
                 cut = min(module.in_features, module.out_features)/SEQ_LEN
@@ -269,6 +335,7 @@ def main(args):
                     gamma = cut * torch.tensor(gamma_json[name], dtype=computeSVD_dtype)
                 else:
                     gamma = torch.tensor(gamma_json[name], dtype=computeSVD_dtype)
+                gamma = max(1, min(module.in_features, module.out_features, int(gamma)))
                     
                 W=module.weight.data.detach()
                 us_quan, vt_quan, us_absmax, vt_absmax, tuple_info = DOBI_quantize(W, int(gamma), code = None)
@@ -278,14 +345,19 @@ def main(args):
                 mapping_info[name]["us_absmax"]=us_absmax
                 mapping_info[name]["vt_absmax"]=vt_absmax
                 mapping_info[name]["tuple_info"]=tuple_info
+                dequan_us, dequan_vt = DOBI_dequantize(us_quan, vt_quan, us_absmax, vt_absmax, tuple_info, code=None)
+                compress_size = dequan_vt.numel() + dequan_us.numel()
+                ori_size = module.in_features * module.out_features
+                remapped_modules[name] = {
+                    "compress_size": compress_size,
+                    "ori_size": ori_size,
+                    "weight1": dequan_vt.T.detach().cpu(),
+                    "weight2": dequan_us.T.detach().cpu(),
+                    "dense_weight": (dequan_us @ dequan_vt).detach().cpu() if ori_size <= compress_size else None,
+                    "bias": module.bias.detach().cpu() if module.bias is not None else None,
+                }
                 
         torch.save(mapping_info, output_save_path)
-        del model
-        model, _ = load_causal_lm_and_tokenizer(
-            model_id,
-            torch_dtype=model_load_dtype,
-            trust_remote_code=args.trust_remote_code,
-        )
         model.config.dobi_svd = {
             "format": "remapping_hf",
             "base_model_id": model_id,
@@ -293,16 +365,23 @@ def main(args):
             "seq_len": SEQ_LEN,
             "no_svd_layers": no_svd_layers,
         }
-        remapped_weight_keys = set()
-        for name in mapping_info:
-            remapped_weight_keys.add(f"{name}.weight")
-            remapped_weight_keys.add(f"{name}.bias")
-        new_sd = {
-            k: v
-            for k, v in model.state_dict().items()
-            if k not in remapped_weight_keys
-        }
-        model.save_pretrained(output_dir, state_dict=new_sd, safe_serialization=True)
+        module_dict = dict(model.named_modules())
+        for name, info in remapped_modules.items():
+            module = module_dict[name]
+            parent, attr_name = _parent_and_attr(model, name)
+            if info["ori_size"] > info["compress_size"]:
+                new_layer = SVDTransformLayer_remapping(
+                    weight1=info["weight1"].to(model.device),
+                    weight2=info["weight2"].to(model.device),
+                    bias=info["bias"].to(model.device) if info["bias"] is not None else None,
+                    name=name,
+                    device=model.device,
+                )
+                setattr(parent, attr_name, new_layer)
+            else:
+                module.weight.data = info["dense_weight"].to(module.weight.device, dtype=module.weight.dtype)
+        _enable_direct_transformers_load(model, output_dir)
+        model.save_pretrained(output_dir, safe_serialization=True)
         tokenizer.save_pretrained(output_dir)
         
     print("done")

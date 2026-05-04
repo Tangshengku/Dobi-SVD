@@ -120,6 +120,15 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from modelutils import load_remapping_model, load_unremapping_model
 
+# Direct Transformers load for newly exported checkpoints.
+model_id = "./results/compressed_model/Qwen3-8B/DobiSVD-Qwen3-8B-0.2"
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.float16,
+    trust_remote_code=True,
+)
+tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
 # Load the remapping Model
 model_id = "./results/compressed_model/Llama-2-7b-hf/DobiSVD-Llama-2-7b-hf-0.4"
 model, tokenizer = load_remapping_model(model_id)
