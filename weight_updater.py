@@ -192,9 +192,12 @@ def main(args):
 
 
     def process_batch(ipca,A,name): 
+        n_components = min(ipca.n_components, A.shape[0], A.shape[1])
+        ipca.n_components = n_components
+        ipca.n_components_ = n_components
         ipca.partial_fit(A)
         principal_components = ipca.components_
-        principal_components_tensor = torch.tensor(principal_components, device=A.device)
+        principal_components_tensor = principal_components.detach().clone().to(A.device)
         PCA_tensor_dict[name] = principal_components_tensor.to(DEV_CPU)
         del principal_components_tensor
         del A
@@ -244,7 +247,7 @@ def main(args):
             m,n =module.weight.shape
             
             cut = min(module.in_features, module.out_features)/SEQ_LEN
-            module.Ngamma = int(cut)
+            module.Ngamma = max(1, int(math.ceil(cut)))
             if cut>1:
                 real_gamma = min(m,n, max(1,cut*math.ceil(gamma)))
             else:
@@ -266,8 +269,20 @@ def main(args):
         with torch.no_grad():
             model(**batch)
 
+    for name, v_accu_list in tqdm(V_accu_list_dict.items(), desc="Finalize PCA components"):
+        if name in PCA_tensor_dict or len(v_accu_list) == 0:
+            continue
+        Vf_full = torch.concatenate(v_accu_list, axis=1).to(DEV_GPU)
+        process_batch(V_PCA_dict[name], Vf_full.T, name)
+        V_accu_list_dict[name] = []
+        del Vf_full
+        gc.collect()
+        torch.cuda.empty_cache()
+
     
     def change_weight(gamma, W, name):
+        if name not in PCA_tensor_dict:
+            raise KeyError(f"No PCA components collected for {name}. Increase n_train_samples or check the calibration forward pass.")
         W = W.to(computeSVD_dtype)
         principal_components_tensor = PCA_tensor_dict[name]
         V_pca =principal_components_tensor.T.cuda().to(computeSVD_dtype)
