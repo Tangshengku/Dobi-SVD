@@ -122,13 +122,16 @@ def main(args):
     tokenized_traindata, tokenized_valdata = prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache_dir, args)
 
     
-    # evaluate ppl of original model
-    print("Start evaluating the original model's PPL.")
-    val_input_ids = torch.cat([_["input_ids"].unsqueeze(0) for _ in tokenized_valdata], 0)
-    model.to(DEV_GPU)
-    orig_PPL = evaluate_perplexity(model, val_input_ids, NSAMPLES_val)
-    model.to(DEV_CPU)
-    print(f"Original Perplexity: {orig_PPL}")
+    if args.skip_eval:
+        orig_PPL = None
+        print("Skipping original model PPL evaluation.")
+    else:
+        print("Start evaluating the original model's PPL.")
+        val_input_ids = torch.cat([_["input_ids"].unsqueeze(0) for _ in tokenized_valdata], 0)
+        model.to(DEV_GPU)
+        orig_PPL = evaluate_perplexity(model, val_input_ids, NSAMPLES_val)
+        model.to(DEV_CPU)
+        print(f"Original Perplexity: {orig_PPL}")
 
 
     
@@ -251,7 +254,8 @@ def main(args):
                 CURR_loss = total_loss.mean().item()
                 if CURR_loss < BEST_loss:
                     base_model.BEST_loss = torch.tensor(CURR_loss, device = base_model.BEST_loss.device)
-                    k_dict["PPL_ORIG"] = orig_PPL
+                    if orig_PPL is not None:
+                        k_dict["PPL_ORIG"] = orig_PPL
                     output_json_path = str(TA_tarined_model_output_dir/'best_gamma.json')
                     with open(output_json_path, 'w') as json_file:
                         json.dump(k_dict, json_file, indent=4)
@@ -294,17 +298,18 @@ def main(args):
         remove_unused_columns=False,
         # deepspeed =deepspeed_config
     )
+    eval_strategy = "no" if args.skip_eval else "epoch"
     if "evaluation_strategy" in training_arg_names:
-        training_kwargs["evaluation_strategy"] = "epoch"
+        training_kwargs["evaluation_strategy"] = eval_strategy
     else:
-        training_kwargs["eval_strategy"] = "epoch"
+        training_kwargs["eval_strategy"] = eval_strategy
     training_args = TrainingArguments(**training_kwargs)
    
     trainer = SVDTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_traindata,
-        eval_dataset=tokenized_valdata,
+        eval_dataset=None if args.skip_eval else tokenized_valdata,
         data_collator=data_collator,
     )
 
@@ -364,20 +369,24 @@ def main(args):
 
 
 
-    # evaluate activation-truncated model
-    val_input_ids = torch.cat([_["input_ids"].unsqueeze(0) for _ in tokenized_valdata], 0)
-    DASVD_PPL = evaluate_perplexity(model, val_input_ids, NSAMPLES_val)
     model = accelerator.unwrap_model(model)
     torch.cuda.empty_cache()
-    print(f"Trained Perplexity: {DASVD_PPL}")
+    if args.skip_eval:
+        DASVD_PPL = None
+        print("Skipping trained model PPL evaluation.")
+    else:
+        val_input_ids = torch.cat([_["input_ids"].unsqueeze(0) for _ in tokenized_valdata], 0)
+        DASVD_PPL = evaluate_perplexity(model, val_input_ids, NSAMPLES_val)
+        print(f"Trained Perplexity: {DASVD_PPL}")
     k_dict = {}
     for name, module in model.named_modules():
         if isinstance(module, SVDTransformLayer):
             k_dict[name]=module.gamma.detach().item()
-    k_dict["PPL"] = {
+    if not args.skip_eval:
+        k_dict["PPL"] = {
             'orig_PPL': orig_PPL,
             'DASVD_PPL': DASVD_PPL,
-    }
+        }
     output_json_path = str(TA_tarined_model_output_dir/'final_gamma.json')
     with open(output_json_path, 'w') as json_file:
         json.dump(k_dict, json_file, indent=4)
@@ -510,6 +519,13 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="whether to obtain the data set by sampling",
+    )
+
+    parser.add_argument(
+        "--skip_eval",
+        action="store_true",
+        default=False,
+        help="skip original, epoch, and final perplexity evaluation during rank training",
     )
 
 
