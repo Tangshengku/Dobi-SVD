@@ -30,6 +30,10 @@ def _rank_ratio(in_features, out_features, seq_len):
     return max(min(in_features, out_features) / seq_len, 1e-6)
 
 
+def _unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
 def main(args):
     # setting random seed of numpy and torch
     np.random.seed(args.seed)
@@ -180,7 +184,8 @@ def main(args):
     
    # SVDTrainer
     def calculate_compression_loss(model, target_compression_ratio, lambda_reg):
-        size_new = torch.tensor(0.)
+        base_model = _unwrap_model(model)
+        size_new = torch.tensor(0., device=base_model.ori_weight_size.device)
         
         for name, module in model.named_modules():
             if isinstance(module, SVDTransformLayer):
@@ -192,13 +197,14 @@ def main(args):
                 size_ori = module.ori_weight_size
                 size_new = torch.where(size_now < size_ori, size_now, size_ori) + size_new
                 
-        compression_ratio = size_new / model.module.ori_weight_size
+        compression_ratio = size_new / base_model.ori_weight_size
         
         compression_loss = abs(compression_ratio - torch.tensor(target_compression_ratio,device=compression_ratio.device))
         return lambda_reg * compression_loss, compression_ratio
     
     def Wrong_value_loss(model):
-        penalty = torch.tensor(0.,device=model.module.device)
+        base_model = _unwrap_model(model)
+        penalty = torch.tensor(0., device=base_model.device)
         
         for name, module in model.named_modules():
             if isinstance(module, SVDTransformLayer):
@@ -226,8 +232,9 @@ def main(args):
             
             cur_lr = self.optimizer.param_groups[0]['lr']
     
-            model.module.epoch_cnt += 1
-            if model.module.epoch_cnt % save_epoch_num == 0:
+            base_model = _unwrap_model(model)
+            base_model.epoch_cnt += 1
+            if base_model.epoch_cnt % save_epoch_num == 0:
                 k_dict = {}
                 for name, module in self.model.named_modules():
                     if isinstance(module, SVDTransformLayer):
@@ -235,15 +242,15 @@ def main(args):
                 k_dict['ppl']=ppl.detach().tolist()
                 k_dict['compression_ratio']=compression_ratio.detach().tolist()
                 k_dict['lr']=cur_lr
-                output_json_path = str(TA_tarined_model_output_dir/'k_dict_{:05d}.json'.format(model.module.epoch_cnt))
+                output_json_path = str(TA_tarined_model_output_dir/'k_dict_{:05d}.json'.format(base_model.epoch_cnt))
                 with open(output_json_path, 'w') as json_file:
                     json.dump(k_dict, json_file, indent=4)
     
                 
-                BEST_loss = model.module.BEST_loss
+                BEST_loss = base_model.BEST_loss
                 CURR_loss = total_loss.mean().item()
                 if CURR_loss < BEST_loss:
-                    model.module.BEST_loss = torch.tensor(CURR_loss, device = model.module.BEST_loss.device)
+                    base_model.BEST_loss = torch.tensor(CURR_loss, device = base_model.BEST_loss.device)
                     k_dict["PPL_ORIG"] = orig_PPL
                     output_json_path = str(TA_tarined_model_output_dir/'best_gamma.json')
                     with open(output_json_path, 'w') as json_file:
