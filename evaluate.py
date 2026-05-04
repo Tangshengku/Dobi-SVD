@@ -48,14 +48,18 @@ def evaluate_perplexity(model, dataset, limit):
                 shift_labels = input_ids[:,1:].contiguous()
                 loss_fct = nn.CrossEntropyLoss(reduction='none')
                 loss = loss_fct(
-                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_logits.float().view(-1, shift_logits.size(-1)),
                     shift_labels.view(-1),
                 )
                 # neg_log_likelihood = loss.float() * seqlen
                 # nlls.append(neg_log_likelihood)
-                nlls.append(loss)
+                if torch.isfinite(loss).all():
+                    nlls.append(loss)
             # torch.cuda.empty_cache() 
-    ppl = torch.exp(torch.stack(nlls).sum() / (len(nlls) * seqlen))
+    if not nlls:
+        return float("inf")
+    mean_nll = torch.cat([loss.reshape(-1) for loss in nlls]).mean()
+    ppl = torch.exp(mean_nll)
     # ppl = torch.exp(torch.cat(nlls,dim=-1).mean())
     torch.cuda.empty_cache() 
     return ppl.item()

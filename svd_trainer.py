@@ -25,6 +25,10 @@ from evaluate import evaluate_perplexity
 from modules.stable_svd import stable_lowrank_SVD, SVDTransformLayer
 
 
+def _rank_ratio(in_features, out_features, seq_len):
+    return max(min(in_features, out_features) / seq_len, 1e-6)
+
+
 def main(args):
     # setting random seed of numpy and torch
     np.random.seed(args.seed)
@@ -133,7 +137,7 @@ def main(args):
                 parent = dict(model.named_modules())[parent_name]
             else:
                 parent = model
-            RANK_RATIO = int(min(module.in_features, module.out_features)/SEQ_LEN)
+            RANK_RATIO = _rank_ratio(module.in_features, module.out_features, SEQ_LEN)
             
             if remapping:
                 gamma_init = (1/RANK_RATIO)*target_compression_ratio*min(module.in_features, module.out_features)
@@ -179,7 +183,7 @@ def main(args):
         
         for name, module in model.named_modules():
             if isinstance(module, SVDTransformLayer):
-                RANK_RATIO = min(module.ori.in_features,module.ori.out_features)/SEQ_LEN
+                RANK_RATIO = _rank_ratio(module.ori.in_features, module.ori.out_features, SEQ_LEN)
                 if remapping:
                     size_now = max(module.ori.in_features,module.ori.out_features) * module.gamma * RANK_RATIO
                 else:
@@ -209,7 +213,7 @@ def main(args):
     
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
             neg_log_likelihood = loss
-            ppl = torch.exp(neg_log_likelihood)
+            ppl = torch.exp(torch.clamp(neg_log_likelihood, max=20))
             loss = ppl
 
             
