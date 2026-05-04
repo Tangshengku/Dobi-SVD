@@ -17,6 +17,7 @@ from tqdm import tqdm
 from pathlib import Path
 import gc
 import json    
+import inspect
 from datetime import datetime
 
 from utils.datautils import prepare_train_loaders
@@ -208,7 +209,7 @@ def main(args):
         return penalty
         
     class SVDTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
             outputs = model(**inputs)
     
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
@@ -269,23 +270,28 @@ def main(args):
    # training
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     from transformers import TrainingArguments
-    training_args = TrainingArguments(
-        output_dir= TA_tarined_model_output_dir,
-        num_train_epochs = TA_num_train_epochs,
-        evaluation_strategy = "epoch",
-        per_device_train_batch_size = 1,
-        per_device_eval_batch_size = 1,
-        warmup_steps = TA_warmup_steps,
-        lr_scheduler_type = "cosine",
-        seed = args.seed,
-        gradient_accumulation_steps = TA_gradient_accumulation_steps,
+    training_arg_names = inspect.signature(TrainingArguments.__init__).parameters
+    training_kwargs = dict(
+        output_dir=TA_tarined_model_output_dir,
+        num_train_epochs=TA_num_train_epochs,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        warmup_steps=TA_warmup_steps,
+        lr_scheduler_type="cosine",
+        seed=args.seed,
+        gradient_accumulation_steps=TA_gradient_accumulation_steps,
         # load_best_model_at_end = True,
-        save_strategy = "no",
-        save_steps = 1000,
-        save_total_limit = 2,
+        save_strategy="no",
+        save_steps=1000,
+        save_total_limit=2,
         remove_unused_columns=False,
         # deepspeed =deepspeed_config
     )
+    if "evaluation_strategy" in training_arg_names:
+        training_kwargs["evaluation_strategy"] = "epoch"
+    else:
+        training_kwargs["eval_strategy"] = "epoch"
+    training_args = TrainingArguments(**training_kwargs)
    
     trainer = SVDTrainer(
         model=model,
