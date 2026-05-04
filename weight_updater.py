@@ -21,6 +21,7 @@ from datetime import datetime
 import time
 
 from utils.datautils import prepare_train_loaders
+from utils.modeling import get_no_svd_layers, load_causal_lm_and_tokenizer, should_decompose_linear
 from modules.IncrementalPCA import IncrementalPCAonGPU
 from modules.module import SVDTransformLayer
 from modules.remapping import DOBI_quantize
@@ -88,24 +89,22 @@ def main(args):
     if not args.remapping: 
         output_dir = save_dir/ f"DobiSVD_Noremapping-{lower_id}-{target_compression_ratio}"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_save_path = str(output_dir) + "/" + "DobiSVD_Model.pt"
+        output_save_path = str(output_dir)
     if args.remapping: 
         output_dir = save_dir/ f"DobiSVD-{lower_id}-{target_compression_ratio}"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_save_path = str(output_dir) + "/" + "remapping_weight.pt"
     print("The compressed model will be saved in", output_save_path)
     
-    model_no_svd_layer_dic = {}
-    
-    if "llama" in lower_id or "Llama" in lower_id:
-        model_no_svd_layer_dic[lower_id] = ['lm_head']
-    elif "opt" in lower_id:
-        model_no_svd_layer_dic[lower_id] = ['project_out', 'project_in']
+    no_svd_layers = para_data.get("no_svd_layer", get_no_svd_layers(lower_id))
 
 
     # load model
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=model_load_dtype)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model, tokenizer = load_causal_lm_and_tokenizer(
+        model_id,
+        torch_dtype=model_load_dtype,
+        trust_remote_code=args.trust_remote_code,
+    )
     model.to(DEV_GPU)
     
     # load json
@@ -168,7 +167,7 @@ def main(args):
     
     # Collect V_A by using IPCA
     for name, module in tqdm(model.named_modules(), desc="Add SVD attribute to modules"):
-        if isinstance(module, nn.Linear) and all(x not in name for x in model_no_svd_layer_dic[lower_id]):
+        if should_decompose_linear(name, module, no_svd_layers):
             gamma = torch.tensor(gamma_json[name], dtype=computeSVD_dtype)
             module.forward = svd_forward.__get__(module, nn.Linear)
             module.register_buffer('gamma', gamma)
@@ -214,10 +213,14 @@ def main(args):
         return W_new
     
     del model
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=model_load_dtype)
+    model, _ = load_causal_lm_and_tokenizer(
+        model_id,
+        torch_dtype=model_load_dtype,
+        trust_remote_code=args.trust_remote_code,
+    )
     model.to(DEV_GPU)
     for name, module in tqdm(model.named_modules(), desc="Update model weight"):
-        if isinstance(module, nn.Linear) and all(x not in name for x in model_no_svd_layer_dic[lower_id]):
+        if should_decompose_linear(name, module, no_svd_layers):
             cut = min(module.in_features, module.out_features)/SEQ_LEN
             if cut>1:
                 gamma = cut * torch.tensor(gamma_json[name], dtype=computeSVD_dtype)
@@ -232,7 +235,7 @@ def main(args):
     # update and save model
     if not args.remapping:
         for name, module in tqdm(model.named_modules(), desc="Decomposition weights"):
-            if isinstance(module, nn.Linear) and all(x not in name for x in model_no_svd_layer_dic[lower_id]):
+            if should_decompose_linear(name, module, no_svd_layers):
                 parent_name = name.rsplit('.', 1)[0] if '.' in name else '' # split from right 1 time
                 attr_name = name.rsplit('.', 1)[-1]
                 if parent_name != '':
@@ -247,14 +250,21 @@ def main(args):
                 setattr(parent, attr_name, NewLayer)
                 del module
             
-        
-        torch.save({'model': model, 'tokenizer': tokenizer}, output_save_path)
+        model.config.dobi_svd = {
+            "format": "noremapping_hf",
+            "base_model_id": model_id,
+            "target_compression_ratio": target_compression_ratio,
+            "seq_len": SEQ_LEN,
+            "no_svd_layers": no_svd_layers,
+        }
+        model.save_pretrained(output_dir, safe_serialization=True)
+        tokenizer.save_pretrained(output_dir)
         
     if args.remapping:
         mapping_info = {}
         for name, module in tqdm(model.named_modules(), desc="Remapping weights"):
-            if isinstance(module, nn.Linear) and all(x not in name for x in ['lm_head']):
-                cut = min(module.in_features, module.out_features)/2048
+            if should_decompose_linear(name, module, no_svd_layers):
+                cut = min(module.in_features, module.out_features)/SEQ_LEN
                 if cut>1:
                     gamma = cut * torch.tensor(gamma_json[name], dtype=computeSVD_dtype)
                 else:
@@ -271,17 +281,29 @@ def main(args):
                 
         torch.save(mapping_info, output_save_path)
         del model
-        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=model_load_dtype)
-        orig_sd = model.state_dict()
-        new_sd = {}
-        for k, v in orig_sd.items():
-            if "self_attn." in k or "mlp." in k:
-                pass
-            else:
-                new_sd[k] = v
-        model.config.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir) 
-        torch.save(new_sd, f"{output_dir}/pytorch_model.bin")
+        model, _ = load_causal_lm_and_tokenizer(
+            model_id,
+            torch_dtype=model_load_dtype,
+            trust_remote_code=args.trust_remote_code,
+        )
+        model.config.dobi_svd = {
+            "format": "remapping_hf",
+            "base_model_id": model_id,
+            "target_compression_ratio": target_compression_ratio,
+            "seq_len": SEQ_LEN,
+            "no_svd_layers": no_svd_layers,
+        }
+        remapped_weight_keys = set()
+        for name in mapping_info:
+            remapped_weight_keys.add(f"{name}.weight")
+            remapped_weight_keys.add(f"{name}.bias")
+        new_sd = {
+            k: v
+            for k, v in model.state_dict().items()
+            if k not in remapped_weight_keys
+        }
+        model.save_pretrained(output_dir, state_dict=new_sd, safe_serialization=True)
+        tokenizer.save_pretrained(output_dir)
         
     print("done")
 
@@ -309,6 +331,13 @@ if __name__ == "__main__":
         type=str,
         default="meta-llama/Llama-2-7b-hf",
         help="Pretrained model ID",
+    )
+
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        default=False,
+        help="allow custom HuggingFace model code when loading model/tokenizer",
     )
 
     parser.add_argument(
@@ -369,7 +398,7 @@ if __name__ == "__main__":
         "--training_dataset",
         type=str,
         default="wikitext2",
-        choices=["wikitext2", "c4", "ptb", "alpaca", "selfgen"],
+        choices=["wikitext2", "c4", "ptb", "wikitext2_evol_codealpaca_tulu_math"],
         help="finetuning dataset",
     )
 

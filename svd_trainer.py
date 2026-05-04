@@ -20,6 +20,7 @@ import json
 from datetime import datetime
 
 from utils.datautils import prepare_train_loaders
+from utils.modeling import get_no_svd_layers, load_causal_lm_and_tokenizer, should_decompose_linear
 from evaluate import evaluate_perplexity
 from modules.stable_svd import stable_lowrank_SVD, SVDTransformLayer
 
@@ -82,16 +83,14 @@ def main(args):
     model_id = args.model_id
     print("processing model: ", model_id.split('/')[-1])
     
-    model_no_svd_layer_dic = {}
     lower_id = model_id.split('/')[-1]
-    
-    if "llama" in lower_id or "Llama" in lower_id:
-        model_no_svd_layer_dic[lower_id] = ['lm_head']
-    elif "opt" in lower_id:
-        model_no_svd_layer_dic[lower_id] = ['project_out', 'project_in']
+    no_svd_layers = get_no_svd_layers(lower_id)
         
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=model_load_dtype)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model, tokenizer = load_causal_lm_and_tokenizer(
+        model_id,
+        torch_dtype=model_load_dtype,
+        trust_remote_code=args.trust_remote_code,
+    )
     
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -127,7 +126,7 @@ def main(args):
     # transform model 
     model_ori_weight_size = torch.tensor(0)
     for name, module in tqdm(model.named_modules(), desc="Add SVD attribute to modules"):
-        if isinstance(module, nn.Linear) and all(x not in name for x in model_no_svd_layer_dic[lower_id]):
+        if should_decompose_linear(name, module, no_svd_layers):
             parent_name = name.rsplit('.', 1)[0] if '.' in name else '' # split from right 1 time
             attr_name = name.rsplit('.', 1)[-1]
             if parent_name != '':
@@ -333,7 +332,7 @@ def main(args):
             "model_load_dtype": "f16",
             "computeSVD_dtype": "f32"
         },
-        "no_svd_layer": model_no_svd_layer_dic[lower_id],
+        "no_svd_layer": no_svd_layers,
     }
     with open(output_json_path, "w") as json_file:
         json.dump(data, json_file, indent=4)
@@ -397,6 +396,13 @@ if __name__ == "__main__":
         type=str,
         default="meta-llama/Llama-2-7b-hf",
         help="Pretrained model ID",
+    )
+
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        default=False,
+        help="allow custom HuggingFace model code when loading model/tokenizer",
     )
     
     parser.add_argument(
@@ -464,7 +470,7 @@ if __name__ == "__main__":
         "--training_dataset",
         type=str,
         default="wikitext2",
-        choices=["wikitext2", "c4", "ptb"],
+        choices=["wikitext2", "c4", "ptb", "wikitext2_evol_codealpaca_tulu_math"],
         help="finetuning dataset",
     )
 

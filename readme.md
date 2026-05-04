@@ -186,9 +186,10 @@ python svd_trainer.py \
 --target_ratio TARGET_RATIO \
 --seq_len MODEL_SEQ_LEN \
 --seed SAMPLING_SEED \
---training_dataset {wikitext2, c4, ptb} \
+--training_dataset {wikitext2, c4, ptb, wikitext2_evol_codealpaca_tulu_math} \
 --n_train_epochs TRAINING_EPOCHS \
 --n_train_samples NUMBER_OF_TRANING_DATA \
+{--trust_remote_code} \
 {--remapping}
 
 ```
@@ -198,6 +199,12 @@ Examples:
 ```python
 # You can choose different models and parameters for training.
 CUDA_VISIBLE_DEVICES=0,1,2,3 python svd_trainer.py --model_id meta-llama/Llama-2-7b-hf --target_ratio 0.4 --seq_len 2048  --seed 0 --training_dataset wikitext2 --n_train_epochs 20  --n_train_samples 256 --remapping
+
+# Calibrate on the mixed wikitext2 + evol-codealpaca + tulu-math data for Qwen3-8B.
+CUDA_VISIBLE_DEVICES=0,1,2,3 python svd_trainer.py --model_id Qwen/Qwen3-8B --target_ratio 0.4 --seq_len 2048 --seed 0 --training_dataset wikitext2_evol_codealpaca_tulu_math --n_train_epochs 20 --n_train_samples 256 --remapping
+
+# Calibrate on the same mixed data for Mistral-7B.
+CUDA_VISIBLE_DEVICES=0,1,2,3 python svd_trainer.py --model_id mistralai/Mistral-7B-v0.1 --target_ratio 0.4 --seq_len 2048 --seed 0 --training_dataset wikitext2_evol_codealpaca_tulu_math --n_train_epochs 20 --n_train_samples 256 --remapping
 
 
 # For most parameters, we provide recommended default values. You can also simply choose the model and taget ratio and run the following code to implement training.
@@ -233,7 +240,7 @@ CUDA_VISIBLE_DEVICES=0 python weight_updater.py --model_id meta-llama/Llama-2-7b
 CUDA_VISIBLE_DEVICES=0 python weight_updater.py --model_id meta-llama/Llama-2-7b-hf --training_result_path Diff-Noremapping-0.8_wikitext2_2048 --n_train_samples 256 --seed 0
 ```
 
-The updated model will be saved in [./results/compressed_model/].  After that you can use and evaluate it!
+The updated model will be saved in HuggingFace directory style under [./results/compressed_model/], including config and tokenizer files. Non-remapping models are saved with `save_pretrained`; remapping models keep `remapping_weight.pt` alongside HF config/tokenizer files and safetensors residual weights.
 
 
 
@@ -279,4 +286,3 @@ Differences in the primary contributions of the two co–first authors:
 **Jinghan Ke** — Implemented the Taylor-expansion–based solution to the gradient-explosion issue; leveraged quantization-friendly properties to perform remapping, addressing the theoretical bottleneck that singular-value information is under-utilized during truncation; vision-related work: designed the overview figure, created the Dobi-style project page (including several descriptions not present in the paper, reflecting personal perspectives and interpretations), and produced the project video.
 
 Note: The final results were made possible by extensive joint discussion, experimentation, cross-validation, and mutual critique. **When contacting us by email, please include both authors.**
-

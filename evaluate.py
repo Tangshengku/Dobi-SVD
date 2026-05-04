@@ -98,10 +98,16 @@ def main(args):
 
     # load compressed model
     if not args.remapping:
-        model, tokenizer = load_unremapping_model(args.updated_model_path)
+        model, tokenizer = load_unremapping_model(
+            args.updated_model_path,
+            trust_remote_code=args.trust_remote_code,
+        )
         
     if args.remapping:
-        model, tokenizer = load_remapping_model(args.updated_model_path)
+        model, tokenizer = load_remapping_model(
+            args.updated_model_path,
+            trust_remote_code=args.trust_remote_code,
+        )
 
     # Put compressed model on the GPU.
     model.to(DEV_GPU)
@@ -153,6 +159,13 @@ if __name__ == "__main__":
         type=str,
         default="meta-llama/Llama-2-7b-hf",
         help="Pretrained model ID",
+    )
+
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        default=False,
+        help="allow custom HuggingFace model code when loading model/tokenizer",
     )
 
     parser.add_argument(

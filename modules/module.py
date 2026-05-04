@@ -22,7 +22,7 @@ class SVDTransformLayer(nn.Module):
         else:
             self.ALinear = nn.Linear(W_T.size(0), gamma, bias=False, device = device)
             self.BLinear = nn.Linear(gamma, W_T.size(1), bias=True, device = device)
-            self.ALinear.bias = nn.Parameter(bias).to(device)
+            self.BLinear.bias = nn.Parameter(bias).to(device)
        
         self.ALinear.weight = nn.Parameter(A_weight_T.T.contiguous()).to(device) 
         self.BLinear.weight = nn.Parameter(B_weight_T.T.contiguous()).to(device) 
@@ -50,7 +50,7 @@ class SVDTransformLayer_remapping(nn.Module):
         else:
             self.ALinear = nn.Linear(weight1.size(0), weight1.size(1), bias=False, device = device)
             self.BLinear = nn.Linear(weight2.size(0), weight2.size(1), bias=True, device = device)
-            self.ALinear.bias = nn.Parameter(bias).to(device)
+            self.BLinear.bias = nn.Parameter(bias).to(device)
        
         self.ALinear.weight = nn.Parameter(A_weight_T.T.contiguous()).to(device) 
         self.BLinear.weight = nn.Parameter(B_weight_T.T.contiguous()).to(device) 

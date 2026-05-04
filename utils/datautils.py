@@ -1,8 +1,85 @@
 import torch
-from datasets import load_dataset
-from transformers import AutoTokenizer, DataCollatorWithPadding
+from datasets import Dataset, concatenate_datasets, load_dataset
 import random
 from tqdm import tqdm
+
+
+MIXTURE_DATASETS = {
+    "wikitext2_evol_codealpaca_tulu_math": {
+        "wikitext2": ("wikitext", "wikitext-2-raw-v1", "train", "test"),
+        "evol_codealpaca": ("theblackcat102/evol-codealpaca-v1", None, "train", None),
+        "tulu_math": ("allenai/tulu-3-sft-personas-math", None, "train", None),
+    },
+}
+
+
+def _text_from_example(example):
+    if "text" in example and example["text"]:
+        return example["text"]
+    if "messages" in example and example["messages"]:
+        return "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in example["messages"]
+            if message.get("content")
+        )
+    if "conversations" in example and example["conversations"]:
+        return "\n".join(
+            turn.get("value") or turn.get("content", "")
+            for turn in example["conversations"]
+            if turn.get("value") or turn.get("content")
+        )
+    instruction = example.get("instruction") or example.get("prompt") or example.get("question") or ""
+    input_text = example.get("input") or ""
+    output = example.get("output") or example.get("response") or example.get("answer") or ""
+    return "\n".join(part for part in (instruction, input_text, output) if part)
+
+
+def _load_hf_dataset(path, config, split, cache_dir):
+    if config:
+        return load_dataset(path, config, split=split, cache_dir=cache_dir)
+    return load_dataset(path, split=split, cache_dir=cache_dir)
+
+
+def _load_mixture_dataset(dataset_cache_dir, seed, n_train_samples):
+    spec = MIXTURE_DATASETS["wikitext2_evol_codealpaca_tulu_math"]
+    wiki_path, wiki_config, wiki_train_split, wiki_val_split = spec["wikitext2"]
+    wiki_train = _load_hf_dataset(wiki_path, wiki_config, wiki_train_split, dataset_cache_dir)
+    wiki_val = _load_hf_dataset(wiki_path, wiki_config, wiki_val_split, dataset_cache_dir)
+
+    evol_path, evol_config, evol_split, _ = spec["evol_codealpaca"]
+    evol_train = _load_hf_dataset(evol_path, evol_config, evol_split, dataset_cache_dir)
+
+    tulu_path, tulu_config, tulu_split, _ = spec["tulu_math"]
+    tulu_train = _load_hf_dataset(tulu_path, tulu_config, tulu_split, dataset_cache_dir)
+
+    def to_text_dataset(dataset, prefix, max_rows=None):
+        has_math_source = "source" in dataset.column_names or "dataset" in dataset.column_names
+        texts = []
+        if max_rows is not None:
+            pool_size = max_rows * 20 if has_math_source else max_rows
+            dataset = dataset.shuffle(seed=seed).select(range(min(pool_size, len(dataset))))
+        for row in tqdm(dataset, desc=f"Formatting {prefix}", unit=" row"):
+            if has_math_source and prefix == "tulu-math":
+                source = str(row.get("source", row.get("dataset", ""))).lower()
+                if "math" not in source:
+                    continue
+            text = _text_from_example(row)
+            if text:
+                texts.append(text)
+            if max_rows is not None and len(texts) >= max_rows:
+                break
+        return Dataset.from_dict({"text": texts})
+
+    train_rows_per_source = max(n_train_samples * 8, 1024)
+    train_parts = [
+        to_text_dataset(wiki_train, "wikitext2", train_rows_per_source),
+        to_text_dataset(evol_train, "evol-codealpaca", train_rows_per_source),
+        to_text_dataset(tulu_train, "tulu-math", train_rows_per_source),
+    ]
+    valdata = to_text_dataset(wiki_val, "wikitext2 validation")
+    traindata = concatenate_datasets(train_parts).shuffle(seed=seed)
+    return traindata, valdata
+
 
 def prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache_dir, args):
     traindata_cache_file = dataset_cache_dir / f"traindata.pt"
@@ -33,6 +110,10 @@ def prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache
         elif DATASET_NAME == 'ptb':
             traindata = load_dataset("ptb_text_only", "penn_treebank", split="train", cache_dir=dataset_cache_dir)
             valdata = load_dataset("ptb_text_only", "penn_treebank", split="validation", cache_dir=dataset_cache_dir)
+        elif DATASET_NAME == "wikitext2_evol_codealpaca_tulu_math":
+            traindata, valdata = _load_mixture_dataset(dataset_cache_dir, SEED, NSAMPLES_train)
+        else:
+            raise ValueError(f"Unsupported dataset: {DATASET_NAME}")
         if SAVE:
             torch.save(traindata, traindata_cache_file)
             torch.save(valdata, valdata_cache_file)
@@ -93,8 +174,8 @@ def prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache
                 tokenized_valdata.append({"input_ids": inp, "attention_mask": attention_mask})
 
         
-        elif DATASET_NAME == 'wikitext2' or DATASET_NAME == 'ptb':
-            if DATASET_NAME == 'wikitext2':
+        elif DATASET_NAME in {'wikitext2', 'ptb', "wikitext2_evol_codealpaca_tulu_math"}:
+            if DATASET_NAME in {'wikitext2', "wikitext2_evol_codealpaca_tulu_math"}:
                 train_tot_text = "\n\n".join(traindata["text"])
                 val_tot_text = "\n\n".join(valdata["text"])
             elif DATASET_NAME == 'ptb':
