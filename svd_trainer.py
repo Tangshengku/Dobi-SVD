@@ -223,8 +223,10 @@ def main(args):
     
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
             neg_log_likelihood = loss
-            ppl = torch.exp(torch.clamp(neg_log_likelihood, max=20))
-            loss = ppl
+            if not torch.isfinite(neg_log_likelihood).all():
+                neg_log_likelihood = torch.zeros_like(neg_log_likelihood)
+            ppl = torch.exp(torch.clamp(neg_log_likelihood.detach(), max=20))
+            loss = neg_log_likelihood
 
             
             reg_loss, compression_ratio = calculate_compression_loss(model, target_compression_ratio, lambda_reg)
@@ -232,6 +234,7 @@ def main(args):
     
             # print(value_loss)
             total_loss = loss + reg_loss+value_loss
+            total_loss = torch.nan_to_num(total_loss, nan=0.0, posinf=1e4, neginf=0.0)
             
             cur_lr = self.optimizer.param_groups[0]['lr']
     
@@ -541,7 +544,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--scheduler_lr",
         type=float,
-        default=5,
+        default=0.05,
         help="scheduler lr of finetuning",
     )
 
@@ -555,7 +558,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--scheduler_min_lr",
         type=float,
-        default=4,
+        default=0.005,
         help="scheduler min lr of finetuning",
     )
 

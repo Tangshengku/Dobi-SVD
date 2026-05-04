@@ -13,6 +13,8 @@ TRAINING_DATASET="${TRAINING_DATASET:-wikitext2_evol_codealpaca_tulu_math}"
 N_TRAIN_EPOCHS="${N_TRAIN_EPOCHS:-20}"
 N_TRAIN_SAMPLES="${N_TRAIN_SAMPLES:-256}"
 N_EVAL_SAMPLES="${N_EVAL_SAMPLES:-256}"
+SCHEDULER_LR="${SCHEDULER_LR:-0.05}"
+SCHEDULER_MIN_LR="${SCHEDULER_MIN_LR:-0.005}"
 PATH_HEAD_FOLDER="${PATH_HEAD_FOLDER:-./}"
 PATH_HEAD_FOLDER_OUTPUT="${PATH_HEAD_FOLDER_OUTPUT:-./results}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
@@ -43,6 +45,8 @@ python svd_trainer.py \
   --n_train_epochs "${N_TRAIN_EPOCHS}" \
   --n_train_samples "${N_TRAIN_SAMPLES}" \
   --n_eval_samples "${N_EVAL_SAMPLES}" \
+  --scheduler_lr "${SCHEDULER_LR}" \
+  --scheduler_min_lr "${SCHEDULER_MIN_LR}" \
   --path_head_folder "${PATH_HEAD_FOLDER}" \
   --path_head_folder_output "${PATH_HEAD_FOLDER_OUTPUT}" \
   "${EXTRA_FLAGS[@]}"
