@@ -184,6 +184,16 @@ def main(args):
 
     # prepared dataset
     tokenized_traindata, tokenized_valdata = prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache_dir, args)
+    model_vocab_size = model.get_input_embeddings().weight.shape[0]
+    for split_name, tokenized_data in (("train", tokenized_traindata), ("validation", tokenized_valdata)):
+        for idx, sample in enumerate(tokenized_data[: min(8, len(tokenized_data))]):
+            input_ids = sample["input_ids"]
+            if input_ids.min().item() < 0 or input_ids.max().item() >= model_vocab_size:
+                raise ValueError(
+                    f"{split_name} sample {idx} has token id outside model vocab "
+                    f"(max_id={input_ids.max().item()}, vocab_size={model_vocab_size}). "
+                    "Regenerate tokenized cache with --RECREATE or remove the data_cache files."
+                )
 
     
     V_PCA_dict = {}

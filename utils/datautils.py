@@ -1,6 +1,7 @@
 import torch
 from datasets import Dataset, concatenate_datasets, load_dataset
 import random
+import re
 from tqdm import tqdm
 
 
@@ -81,6 +82,30 @@ def _load_mixture_dataset(dataset_cache_dir, seed, n_train_samples):
     return traindata, valdata
 
 
+def _safe_cache_key(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_") or "unknown"
+
+
+def _tokenizer_cache_key(tokenizer, args):
+    model_key = getattr(args, "model_id", None) or getattr(args, "updated_model_path", None)
+    tokenizer_key = getattr(tokenizer, "name_or_path", None) or model_key or tokenizer.__class__.__name__
+    vocab_size = len(tokenizer)
+    return _safe_cache_key(f"{tokenizer_key}_{tokenizer.__class__.__name__}_v{vocab_size}")
+
+
+def _tokenized_data_is_valid(tokenized_data, tokenizer):
+    if not tokenized_data:
+        return False
+    vocab_size = len(tokenizer)
+    for sample in tokenized_data[: min(8, len(tokenized_data))]:
+        input_ids = sample["input_ids"]
+        if input_ids.numel() == 0:
+            return False
+        if input_ids.min().item() < 0 or input_ids.max().item() >= vocab_size:
+            return False
+    return True
+
+
 def prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache_dir, args):
     traindata_cache_file = dataset_cache_dir / f"traindata.pt"
     valdata_cache_file = dataset_cache_dir / f"valdata.pt"
@@ -122,13 +147,19 @@ def prepare_train_loaders(tokenizer, DATASET_NAME, data_cache_dir, dataset_cache
     print("Training and validation has been loaded!")
     
     
-    tokenized_traindata_cache_file = data_cache_dir / f"traindata_{DATASET_NAME}_{NSAMPLES_train}_{SEQ_LEN}.pt"
-    tokenized_valdata_cache_file = data_cache_dir / f"valdata_{DATASET_NAME}_{NSAMPLES_val}_{SEQ_LEN}.pt"
+    tokenizer_key = _tokenizer_cache_key(tokenizer, args)
+    tokenized_traindata_cache_file = data_cache_dir / f"traindata_{DATASET_NAME}_{tokenizer_key}_{NSAMPLES_train}_{SEQ_LEN}.pt"
+    tokenized_valdata_cache_file = data_cache_dir / f"valdata_{DATASET_NAME}_{tokenizer_key}_{NSAMPLES_val}_{SEQ_LEN}.pt"
     LOAD = tokenized_traindata_cache_file.exists() and tokenized_valdata_cache_file.exists()
     
     if LOAD and not args.RECREATE:
         tokenized_traindata = torch.load(tokenized_traindata_cache_file)
         tokenized_valdata = torch.load(tokenized_valdata_cache_file)
+        if not _tokenized_data_is_valid(tokenized_traindata, tokenizer) or not _tokenized_data_is_valid(tokenized_valdata, tokenizer):
+            print("Cached tokenized data is invalid for this tokenizer; regenerating.")
+            LOAD = False
+    if LOAD and not args.RECREATE:
+        pass
     else:
         # traindata
         tokenized_traindata = []
